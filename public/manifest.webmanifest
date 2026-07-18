@@ -1,0 +1,16 @@
+{
+  "name": "マンガ棚",
+  "short_name": "マンガ棚",
+  "description": "次に読む巻、所持巻、全巻読了をすぐ確認できる漫画台帳",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#eef2e9",
+  "theme_color": "#eef2e9",
+  "icons": [
+    { "src": "icons/manga-shelf-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/manga-shelf-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/manga-shelf-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
