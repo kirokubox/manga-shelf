@@ -9,6 +9,7 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
 const asText = (value: unknown) => typeof value === "string" ? value : "";
 const asNullableText = (value: unknown) => typeof value === "string" && value.trim() ? value : null;
 const asPositiveInt = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+const asNonNegativeInt = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 const now = () => new Date().toISOString();
 
 export function normalizeRanges(ranges: VolumeRange[]): VolumeRange[] {
@@ -82,10 +83,15 @@ export function remainingVolumes(series: MangaSeries): number | null {
   return Math.max(series.totalVolumes - (series.readUpTo ?? 0), 0);
 }
 
+export const isFullyRead = (series: MangaSeries) =>
+  series.publicationStatus === "completed" &&
+  Boolean(series.totalVolumes) &&
+  series.readProgressKnown &&
+  (series.readUpTo ?? 0) >= (series.totalVolumes ?? 0);
+
 export const needsReview = (series: MangaSeries) =>
   !series.readProgressKnown || !series.ownershipKnown || series.publicationStatus === "unknown" ||
-  (series.publicationStatus === "completed" && !series.totalVolumes) ||
-  (series.ownedMedium === "paper" && !series.paperLocation);
+  (series.publicationStatus === "completed" && !series.totalVolumes);
 
 function normalizeOwnedMedium(value: unknown): OwnedMedium {
   return value === "paper" || value === "kindle" || value === "jump_plus" ? value : null;
@@ -120,7 +126,7 @@ function normalizeV2Series(value: unknown): MangaSeries | null {
     totalVolumes: asPositiveInt(item.totalVolumes),
     bibliographyCheckedAt: asNullableText(item.bibliographyCheckedAt),
     readProgressKnown: item.readProgressKnown === true,
-    readUpTo: asPositiveInt(item.readUpTo),
+    readUpTo: asNonNegativeInt(item.readUpTo),
     finishedAt: asNullableText(item.finishedAt),
     ownershipKnown: item.ownershipKnown === true,
     ownedMedium: medium,
@@ -205,9 +211,9 @@ export function createMarkdown(series: MangaSeries[]): string {
     const remaining = remainingVolumes(item);
     lines.push(`## ${item.title}${item.editionLabel ? `（${item.editionLabel}）` : ""}`);
     lines.push(`- 刊行: ${item.publicationStatus === "completed" ? `完結${item.totalVolumes ? `・全${item.totalVolumes}巻` : ""}` : item.publicationStatus === "ongoing" ? "連載中" : "要確認"}`);
-    lines.push(`- 既読: ${item.readProgressKnown ? item.readUpTo ? `${item.readUpTo}巻まで` : "未読" : "要確認"}`);
+    lines.push(`- 既読: ${isFullyRead(item) ? "全巻読了" : item.readProgressKnown ? item.readUpTo ? `${item.readUpTo}巻まで` : "1巻から読む" : "要確認"}`);
     if (remaining !== null) lines.push(`- 残り: ${remaining}巻`);
-    lines.push(`- 所持: ${item.ownershipKnown ? item.ownedRanges.length ? formatRanges(item.ownedRanges) : "なし" : "要確認"}`);
+    lines.push(`- 所持: ${item.ownershipKnown ? item.ownedRanges.length ? formatRanges(item.ownedRanges) : "なし" : item.ownedMedium ? "巻数未入力" : "要確認"}`);
     if (item.finishedAt) lines.push(`- 全巻読了日: ${item.finishedAt}`);
     if (item.planned) lines.push("- 買う予定: あり");
     if (item.memo) lines.push(`- メモ: ${item.memo}`);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { missingRanges, nextOwnedCandidate, normalizeData, normalizeRanges, parseRanges, remainingVolumes } from "./data";
+import { isFullyRead, missingRanges, nextOwnedCandidate, normalizeData, normalizeRanges, parseRanges, remainingVolumes } from "./data";
 import type { MangaSeries } from "./types";
 
 const base: MangaSeries = {
@@ -31,6 +31,14 @@ describe("volume helpers", () => {
   });
   it("allows reading progress to be ahead of ownership", () => {
     expect(remainingVolumes({ ...base, readUpTo: 10, ownedRanges: [{ from: 1, to: 3 }] })).toBe(0);
+  });
+  it("keeps zero as the explicit state for reading from volume one", () => {
+    const normalized = normalizeData({ version: 2, series: [{ ...base, readUpTo: 0 }] }).series[0];
+    expect(normalized.readUpTo).toBe(0);
+    expect(remainingVolumes(normalized)).toBe(10);
+  });
+  it("recognizes a completed series as fully read without requiring a finish date", () => {
+    expect(isFullyRead({ ...base, readUpTo: 10, finishedAt: null })).toBe(true);
   });
 });
 

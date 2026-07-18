@@ -1,17 +1,18 @@
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookCheck, BookOpen, Check, ChevronRight, CircleHelp, Download, Home, LibraryBig,
-  MapPin, Pencil, Plus, RotateCcw, Search, Settings, SlidersHorizontal, Trash2, Upload, X,
+  Pencil, Plus, RotateCcw, Search, Settings, SlidersHorizontal, Trash2, Upload, X,
 } from "lucide-react";
 import {
-  ACTIVE_VIEW_KEY, createMarkdown, formatRanges, latestOwnedVolume, loadData, missingRanges,
+  ACTIVE_VIEW_KEY, createMarkdown, formatRanges, isFullyRead, latestOwnedVolume, loadData, missingRanges,
   needsReview, nextOwnedCandidate, normalizeData, parseRanges, remainingVolumes, saveData,
 } from "./data";
-import type { MangaSeries, OwnedMedium, PaperLocation, PublicationStatus, UndoState } from "./types";
+import type { MangaSeries, OwnedMedium, PublicationStatus, UndoState } from "./types";
 import "./styles.css";
 
 type View = "shelf" | "settings";
 type Filter = "all" | "continue" | "remaining" | "owned" | "missing" | "finished" | "planned" | "review";
+type SortOrder = "name" | "owned_name";
 type Modal =
   | { kind: "detail"; id: string }
   | { kind: "edit"; id: string | null; reviewMode?: boolean }
@@ -31,7 +32,6 @@ interface Draft {
   readUpTo: string;
   ownershipKnown: boolean;
   ownedMedium: OwnedMedium;
-  paperLocation: PaperLocation;
   ownedRanges: string;
   planned: boolean;
   legacyNote: string;
@@ -42,7 +42,8 @@ interface ImportPreview {
   valid: boolean;
   incoming: MangaSeries[];
   newSeries: MangaSeries[];
-  duplicateCount: number;
+  updatedSeries: MangaSeries[];
+  unchangedCount: number;
   titleWarnings: string[];
   errors: string[];
   migratedV1: boolean;
@@ -58,13 +59,6 @@ const mediumLabel: Record<Exclude<OwnedMedium, null>, string> = {
   jump_plus: "少年ジャンプ＋",
 };
 
-const locationLabel: Record<Exclude<PaperLocation, null>, string> = {
-  home: "自宅",
-  parents_home: "実家",
-  both: "自宅・実家",
-  unknown: "場所要確認",
-};
-
 const publicationLabel: Record<PublicationStatus, string> = {
   ongoing: "連載中",
   completed: "完結",
@@ -74,7 +68,7 @@ const publicationLabel: Record<PublicationStatus, string> = {
 const emptyDraft = (): Draft => ({
   title: "", kana: "", editionLabel: "", publicationStatus: "unknown", totalVolumes: "",
   bibliographyCheckedAt: "", readProgressKnown: false, readUpTo: "", ownershipKnown: false,
-  ownedMedium: null, paperLocation: null, ownedRanges: "", planned: false, legacyNote: "", memo: "",
+  ownedMedium: null, ownedRanges: "", planned: false, legacyNote: "", memo: "",
 });
 
 const draftFromSeries = (item: MangaSeries): Draft => ({
@@ -88,7 +82,6 @@ const draftFromSeries = (item: MangaSeries): Draft => ({
   readUpTo: item.readUpTo?.toString() ?? "",
   ownershipKnown: item.ownershipKnown,
   ownedMedium: item.ownedMedium,
-  paperLocation: item.paperLocation,
   ownedRanges: formatRanges(item.ownedRanges),
   planned: item.planned,
   legacyNote: item.legacyNote,
@@ -128,6 +121,7 @@ function Sheet({ title, children, onClose }: { title: string; children: ReactNod
 
 function SeriesCard({ item, onOpen }: { item: MangaSeries; onOpen: () => void }) {
   const remaining = remainingVolumes(item);
+  const fullyRead = isFullyRead(item);
   const missing = missingRanges(item);
   const nextOwned = nextOwnedCandidate(item);
   return (
@@ -142,15 +136,14 @@ function SeriesCard({ item, onOpen }: { item: MangaSeries; onOpen: () => void })
       <div className="badges">
         <span className={`badge ${item.publicationStatus}`}>{publicationLabel[item.publicationStatus]}{item.totalVolumes ? `・全${item.totalVolumes}巻` : ""}</span>
         {item.ownedMedium && <span className="badge quiet">{mediumLabel[item.ownedMedium]}</span>}
-        {item.ownedMedium === "paper" && item.paperLocation && <span className="badge quiet">{locationLabel[item.paperLocation]}</span>}
         {item.planned && <span className="badge planned">買う予定</span>}
         {needsReview(item) && <span className="badge review">要確認</span>}
       </div>
       <div className="answer-grid">
         <div className="answer primary-answer">
           <span>読む</span>
-          <strong>{item.finishedAt ? "全巻読了済み" : item.readProgressKnown ? `${(item.readUpTo ?? 0) + 1}巻から` : "要確認"}</strong>
-          {item.readProgressKnown && !item.finishedAt && <small>{item.readUpTo ? `${item.readUpTo}巻まで読了` : "まだ読んでいない"}</small>}
+          <strong>{fullyRead ? "全巻読了済み" : item.readProgressKnown ? item.readUpTo === 0 ? "1巻から読む" : `${(item.readUpTo ?? 0) + 1}巻から` : "要確認"}</strong>
+          {item.readProgressKnown && !fullyRead && <small>{item.readUpTo ? `${item.readUpTo}巻まで読了` : "最初から読みたい"}</small>}
         </div>
         <div className="answer">
           <span>残り</span>
@@ -160,7 +153,7 @@ function SeriesCard({ item, onOpen }: { item: MangaSeries; onOpen: () => void })
       </div>
       <div className="ownership-line">
         <span>所持</span>
-        <strong>{item.ownershipKnown ? item.ownedRanges.length ? formatRanges(item.ownedRanges) : "なし" : "要確認"}</strong>
+        <strong>{item.ownershipKnown ? item.ownedRanges.length ? formatRanges(item.ownedRanges) : "なし" : item.ownedMedium ? "巻数未入力" : "要確認"}</strong>
       </div>
       {item.ownershipKnown && missing.length > 0 && <p className="sub-line">未所持：{formatRanges(missing)}</p>}
       {item.ownershipKnown && nextOwned !== null && <p className="sub-line">次にそろえる候補：{nextOwned}巻</p>}
@@ -173,6 +166,7 @@ function App() {
   const [view, setView] = useState<View>(() => localStorage.getItem(ACTIVE_VIEW_KEY) === "settings" ? "settings" : "shelf");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("name");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [modal, setModal] = useState<Modal>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
@@ -197,17 +191,24 @@ function App() {
     return [...series]
       .filter((item) => !term || item.title.normalize("NFKC").toLocaleLowerCase("ja").includes(term) || item.kana.normalize("NFKC").toLocaleLowerCase("ja").includes(term))
       .filter((item) => {
-        if (filter === "continue") return item.readProgressKnown && !item.finishedAt;
+        if (filter === "continue") return item.readProgressKnown && !isFullyRead(item);
         if (filter === "remaining") return remainingVolumes(item) !== null && remainingVolumes(item)! > 0;
-        if (filter === "owned") return item.ownershipKnown && item.ownedRanges.length > 0;
+        if (filter === "owned") return Boolean(item.ownedMedium) || item.ownedRanges.length > 0;
         if (filter === "missing") return missingRanges(item).length > 0;
-        if (filter === "finished") return Boolean(item.finishedAt);
+        if (filter === "finished") return isFullyRead(item);
         if (filter === "planned") return item.planned;
         if (filter === "review") return needsReview(item);
         return true;
       })
-      .sort((a, b) => a.kana.localeCompare(b.kana, "ja"));
-  }, [series, query, filter]);
+      .sort((a, b) => {
+        if (sortOrder === "owned_name") {
+          const aOwned = Boolean(a.ownedMedium) || a.ownedRanges.length > 0;
+          const bOwned = Boolean(b.ownedMedium) || b.ownedRanges.length > 0;
+          if (aOwned !== bOwned) return aOwned ? -1 : 1;
+        }
+        return a.kana.localeCompare(b.kana, "ja");
+      });
+  }, [series, query, filter, sortOrder]);
 
   const selected = modal && "id" in modal ? series.find((item) => item.id === modal.id) ?? null : null;
 
@@ -231,10 +232,9 @@ function App() {
     const ranges = parseRanges(draft.ownedRanges);
     if (!title || !kana) return setFormError("タイトルとよみがなを入力してください");
     if (draft.publicationStatus === "completed" && (!totalVolumes || totalVolumes < 1)) return setFormError("完結作品は全巻数を入力してください");
-    if (readUpTo !== null && (!Number.isInteger(readUpTo) || readUpTo < 1)) return setFormError("既読巻は1以上の整数で入力してください");
+    if (readUpTo !== null && (!Number.isInteger(readUpTo) || readUpTo < 0)) return setFormError("既読巻は0以上の整数で入力してください");
     if (ranges === null) return setFormError("所持巻は「1-5, 7-10」の形式で入力してください");
     if (draft.ownershipKnown && ranges.length > 0 && !draft.ownedMedium) return setFormError("所持媒体を選んでください");
-    if (draft.ownedMedium === "paper" && !draft.paperLocation) return setFormError("紙の所在地を選んでください");
     const existing = modal?.kind === "edit" && modal.id ? series.find((item) => item.id === modal.id) : null;
     const timestamp = now();
     const item: MangaSeries = {
@@ -242,9 +242,9 @@ function App() {
       publicationStatus: draft.publicationStatus, totalVolumes,
       bibliographyCheckedAt: draft.bibliographyCheckedAt || null,
       readProgressKnown: draft.readProgressKnown, readUpTo: draft.readProgressKnown ? readUpTo : null,
-      finishedAt: existing?.finishedAt && draft.publicationStatus === "completed" && totalVolumes === readUpTo ? existing.finishedAt : null,
+      finishedAt: existing?.finishedAt && draft.publicationStatus === "completed" && totalVolumes !== null && readUpTo !== null && readUpTo >= totalVolumes ? existing.finishedAt : null,
       ownershipKnown: draft.ownershipKnown, ownedMedium: draft.ownedMedium,
-      paperLocation: draft.ownedMedium === "paper" ? draft.paperLocation : null,
+      paperLocation: null,
       ownedRanges: draft.ownershipKnown ? ranges : [], planned: draft.planned,
       legacyNote: draft.legacyNote.trim(), memo: draft.memo.trim(),
       createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp,
@@ -260,8 +260,14 @@ function App() {
     event.preventDefault();
     if (!selected) return;
     const value = quickValue ? Number(quickValue) : null;
-    if (value !== null && (!Number.isInteger(value) || value < 1)) return setFormError("1以上の整数で入力してください");
+    if (value !== null && (!Number.isInteger(value) || value < 0)) return setFormError("0以上の整数で入力してください");
     replaceSeries(series.map((item) => item.id === selected.id ? { ...item, readProgressKnown: true, readUpTo: value, finishedAt: null, updatedAt: now() } : item), `${selected.title}の既読巻を更新しました`);
+    setModal({ kind: "detail", id: selected.id });
+  };
+
+  const saveReadFromStart = () => {
+    if (!selected) return;
+    replaceSeries(series.map((item) => item.id === selected.id ? { ...item, readProgressKnown: true, readUpTo: 0, finishedAt: null, updatedAt: now() } : item), `${selected.title}を1巻から読む作品にしました`);
     setModal({ kind: "detail", id: selected.id });
   };
 
@@ -271,7 +277,6 @@ function App() {
     const ranges = parseRanges(quickValue);
     if (ranges === null) return setFormError("「1-5, 7-10」の形式で入力してください");
     if (ranges.length > 0 && !selected.ownedMedium) return setFormError("先に「すべて編集」で所持媒体を選んでください");
-    if (selected.ownedMedium === "paper" && !selected.paperLocation) return setFormError("先に「すべて編集」で紙の所在地を選んでください");
     replaceSeries(series.map((item) => item.id === selected.id ? { ...item, ownershipKnown: true, ownedRanges: ranges, updatedAt: now() } : item), `${selected.title}の所持巻を更新しました`);
     setModal({ kind: "detail", id: selected.id });
   };
@@ -296,17 +301,22 @@ function App() {
     try {
       const raw = JSON.parse(await file.text()) as Record<string, unknown>;
       const normalized = normalizeData(raw);
-      const ids = new Set(series.map((item) => item.id));
+      const existingById = new Map(series.map((item) => [item.id, item]));
       const titles = new Map(series.map((item) => [normalizedTitle(item.title), item.title]));
-      const newSeries = normalized.series.filter((item) => !ids.has(item.id));
+      const newSeries = normalized.series.filter((item) => !existingById.has(item.id));
+      const updatedSeries = normalized.series.filter((item) => {
+        const existing = existingById.get(item.id);
+        return existing && JSON.stringify(existing) !== JSON.stringify(item);
+      });
+      const unchangedCount = normalized.series.length - newSeries.length - updatedSeries.length;
       const titleWarnings = newSeries.flatMap((item) => {
         const match = titles.get(normalizedTitle(item.title));
         return match ? [`「${item.title}」は既存の「${match}」と同名候補です。自動統合はしません`] : [];
       });
-      setImportPreview({ valid: true, incoming: normalized.series, newSeries, duplicateCount: normalized.series.length - newSeries.length, titleWarnings, errors: [], migratedV1: raw.version !== 2 });
+      setImportPreview({ valid: true, incoming: normalized.series, newSeries, updatedSeries, unchangedCount, titleWarnings, errors: [], migratedV1: raw.version !== 2 });
       setModal({ kind: "import" });
     } catch (error) {
-      setImportPreview({ valid: false, incoming: [], newSeries: [], duplicateCount: 0, titleWarnings: [], errors: [error instanceof Error ? error.message : "ファイルを読み込めませんでした"], migratedV1: false });
+      setImportPreview({ valid: false, incoming: [], newSeries: [], updatedSeries: [], unchangedCount: 0, titleWarnings: [], errors: [error instanceof Error ? error.message : "ファイルを読み込めませんでした"], migratedV1: false });
       setModal({ kind: "import" });
     } finally {
       event.target.value = "";
@@ -315,8 +325,10 @@ function App() {
 
   const applyImport = () => {
     if (!importPreview?.valid) return;
-    replaceSeries([...series, ...importPreview.newSeries], `${importPreview.newSeries.length}作品を追加しました`);
-    setMessage(`${importPreview.newSeries.length}作品を取り込み、${importPreview.duplicateCount}作品を重複としてスキップしました`);
+    const incomingById = new Map(importPreview.incoming.map((item) => [item.id, item]));
+    const merged = series.map((item) => incomingById.get(item.id) ?? item);
+    replaceSeries([...merged, ...importPreview.newSeries], `${importPreview.updatedSeries.length}作品を更新、${importPreview.newSeries.length}作品を追加しました`);
+    setMessage(`${importPreview.updatedSeries.length}作品を更新し、${importPreview.newSeries.length}作品を追加しました`);
     setModal(null);
   };
 
@@ -342,7 +354,13 @@ function App() {
             <button className={`filter-button ${filtersOpen ? "active" : ""}`} onClick={() => setFiltersOpen(!filtersOpen)} aria-label="絞り込み"><SlidersHorizontal /></button>
           </div>
           {filtersOpen && <div className="filter-chips">{filters.map((item) => <button key={item.id} className={filter === item.id ? "active" : ""} onClick={() => setFilter(item.id)}>{item.label}</button>)}</div>}
-          <div className="result-meta"><span>{visibleSeries.length}作品</span>{filter !== "all" && <button onClick={() => setFilter("all")}>絞り込み解除</button>}</div>
+          <div className="result-meta">
+            <span>{visibleSeries.length}作品</span>
+            <div className="result-tools">
+              {filter !== "all" && <button onClick={() => setFilter("all")}>絞り込み解除</button>}
+              <label className="sort-select"><span>並び順</span><select value={sortOrder} onChange={(event) => setSortOrder(event.target.value as SortOrder)}><option value="name">名前順</option><option value="owned_name">所持あり→名前順</option></select></label>
+            </div>
+          </div>
           <div className="series-list">
             {visibleSeries.map((item) => <SeriesCard key={item.id} item={item} onOpen={() => setModal({ kind: "detail", id: item.id })} />)}
             {visibleSeries.length === 0 && <div className="empty-state"><LibraryBig /><h2>該当する作品はありません</h2><p>検索語や絞り込みを変えてください。</p></div>}
@@ -357,11 +375,11 @@ function App() {
             </div>
           </section>
           <section className="settings-card">
-            <h2>追加インポート</h2><p>既存データは消さず、IDが新しい作品だけ追加します。v1は要確認状態へ安全に変換します。</p>
+            <h2>追加・更新インポート</h2><p>IDが一致する作品は更新し、新しいIDは追加します。ファイルにない既存作品は残ります。v1は要確認状態へ安全に変換します。</p>
             <button onClick={() => fileInputRef.current?.click()}><Upload />JSONを選ぶ</button>
             <input ref={fileInputRef} hidden type="file" accept="application/json,.json" onChange={readImport} />
           </section>
-          <section className="settings-card compact-stats"><h2>現在のデータ</h2><div><span>全作品<strong>{series.length}</strong></span><span>要確認<strong>{reviewItems.length}</strong></span><span>全巻読了<strong>{series.filter((item) => item.finishedAt).length}</strong></span></div></section>
+          <section className="settings-card compact-stats"><h2>現在のデータ</h2><div><span>全作品<strong>{series.length}</strong></span><span>要確認<strong>{reviewItems.length}</strong></span><span>全巻読了<strong>{series.filter(isFullyRead).length}</strong></span></div></section>
           {message && <p className="inline-message">{message}</p>}
         </>}
       </main>
@@ -373,19 +391,19 @@ function App() {
 
       {modal?.kind === "detail" && selected && <Sheet title={selected.title} onClose={() => setModal(null)}>
         <div className="detail-summary">
-          <div><span>次に読む</span><strong>{selected.finishedAt ? "全巻読了済み" : selected.readProgressKnown ? `${(selected.readUpTo ?? 0) + 1}巻から` : "要確認"}</strong></div>
+          <div><span>次に読む</span><strong>{isFullyRead(selected) ? "全巻読了済み" : selected.readProgressKnown ? selected.readUpTo === 0 ? "1巻から読む" : `${(selected.readUpTo ?? 0) + 1}巻から` : "要確認"}</strong></div>
           <div><span>残り</span><strong>{selected.publicationStatus === "completed" ? remainingVolumes(selected) === null ? "要確認" : `${remainingVolumes(selected)}巻` : "—"}</strong></div>
         </div>
         <div className="quick-actions">
           <button className="primary" onClick={() => { setQuickValue(selected.readUpTo?.toString() ?? ""); setFormError(""); setModal({ kind: "read", id: selected.id }); }}><BookOpen />ここまで読んだ</button>
           <button onClick={() => { setQuickValue(formatRanges(selected.ownedRanges)); setFormError(""); setModal({ kind: "owned", id: selected.id }); }}><LibraryBig />所持巻を編集</button>
-          <button onClick={() => markFinished(selected)} disabled={Boolean(selected.finishedAt)}><BookCheck />{selected.finishedAt ? "全巻読了済み" : "今日全巻読了した"}</button>
+          <button onClick={() => markFinished(selected)} disabled={isFullyRead(selected)}><BookCheck />{isFullyRead(selected) ? "全巻読了済み" : "今日全巻読了した"}</button>
         </div>
         <dl className="detail-list">
           <div><dt>刊行</dt><dd>{publicationLabel[selected.publicationStatus]}{selected.totalVolumes ? `・全${selected.totalVolumes}巻` : ""}</dd></div>
-          <div><dt>既読</dt><dd>{selected.readProgressKnown ? selected.readUpTo ? `${selected.readUpTo}巻まで` : "未読" : "要確認"}</dd></div>
-          <div><dt>所持</dt><dd>{selected.ownershipKnown ? selected.ownedRanges.length ? formatRanges(selected.ownedRanges) : "なし" : "要確認"}</dd></div>
-          <div><dt>媒体</dt><dd>{selected.ownedMedium ? mediumLabel[selected.ownedMedium] : "—"}{selected.ownedMedium === "paper" && selected.paperLocation ? `・${locationLabel[selected.paperLocation]}` : ""}</dd></div>
+          <div><dt>既読</dt><dd>{selected.readProgressKnown ? selected.readUpTo ? `${selected.readUpTo}巻まで` : "1巻から読む" : "要確認"}</dd></div>
+          <div><dt>所持</dt><dd>{selected.ownershipKnown ? selected.ownedRanges.length ? formatRanges(selected.ownedRanges) : "なし" : selected.ownedMedium ? "巻数未入力" : "要確認"}</dd></div>
+          <div><dt>媒体</dt><dd>{selected.ownedMedium ? mediumLabel[selected.ownedMedium] : "—"}</dd></div>
           {selected.legacyNote && <div><dt>元情報</dt><dd>{selected.legacyNote}</dd></div>}
           {selected.memo && <div><dt>メモ</dt><dd>{selected.memo}</dd></div>}
         </dl>
@@ -403,8 +421,8 @@ function App() {
             <label><span>全巻数</span><input type="number" min="1" value={draft.totalVolumes} onChange={(event) => setDraft({ ...draft, totalVolumes: event.target.value })} placeholder="完結作品は必須" /></label>
           </div>
           <label><span>書誌確認日</span><input type="date" value={draft.bibliographyCheckedAt} onChange={(event) => setDraft({ ...draft, bibliographyCheckedAt: event.target.value })} /></label>
-          <fieldset><legend>読書状況</legend><label className="check-row"><input type="checkbox" checked={draft.readProgressKnown} onChange={(event) => setDraft({ ...draft, readProgressKnown: event.target.checked })} /><span>どこまで読んだか確認済み</span></label>{draft.readProgressKnown && <label><span>何巻まで読んだ</span><input type="number" min="1" value={draft.readUpTo} onChange={(event) => setDraft({ ...draft, readUpTo: event.target.value })} placeholder="未読なら空欄" /></label>}</fieldset>
-          <fieldset><legend>所持状況</legend><label className="check-row"><input type="checkbox" checked={draft.ownershipKnown} onChange={(event) => setDraft({ ...draft, ownershipKnown: event.target.checked })} /><span>所持巻を確認済み</span></label><label><span>媒体</span><select value={draft.ownedMedium ?? ""} onChange={(event) => setDraft({ ...draft, ownedMedium: (event.target.value || null) as OwnedMedium, paperLocation: event.target.value === "paper" ? draft.paperLocation : null })}><option value="">所持なし／要確認</option><option value="paper">紙</option><option value="kindle">Kindle</option><option value="jump_plus">少年ジャンプ＋</option></select></label>{draft.ownedMedium === "paper" && <label><span>紙の所在地</span><select value={draft.paperLocation ?? ""} onChange={(event) => setDraft({ ...draft, paperLocation: (event.target.value || null) as PaperLocation })}><option value="">選択してください</option><option value="home">自宅</option><option value="parents_home">実家</option><option value="both">自宅・実家</option><option value="unknown">要確認</option></select></label>}{draft.ownershipKnown && <label><span>所持巻</span><input value={draft.ownedRanges} onChange={(event) => setDraft({ ...draft, ownedRanges: event.target.value })} placeholder="例：1-5, 7-10（所持なしは空欄）" /></label>}</fieldset>
+          <fieldset><legend>読書状況</legend><label className="check-row"><input type="checkbox" checked={draft.readProgressKnown} onChange={(event) => setDraft({ ...draft, readProgressKnown: event.target.checked })} /><span>どこまで読んだか確認済み</span></label>{draft.readProgressKnown && <label><span>何巻まで読んだ（1巻からなら0）</span><input type="number" min="0" value={draft.readUpTo} onChange={(event) => setDraft({ ...draft, readUpTo: event.target.value })} placeholder="1巻から読むなら0" /></label>}</fieldset>
+          <fieldset><legend>所持状況</legend><label className="check-row"><input type="checkbox" checked={draft.ownershipKnown} onChange={(event) => setDraft({ ...draft, ownershipKnown: event.target.checked })} /><span>所持巻を確認済み</span></label><label><span>媒体</span><select value={draft.ownedMedium ?? ""} onChange={(event) => setDraft({ ...draft, ownedMedium: (event.target.value || null) as OwnedMedium })}><option value="">所持なし／要確認</option><option value="paper">紙</option><option value="kindle">Kindle</option><option value="jump_plus">少年ジャンプ＋</option></select></label>{draft.ownershipKnown && <label><span>所持巻</span><input value={draft.ownedRanges} onChange={(event) => setDraft({ ...draft, ownedRanges: event.target.value })} placeholder="例：1-5, 7-10（所持なしは空欄）" /></label>}</fieldset>
           <label className="check-row"><input type="checkbox" checked={draft.planned} onChange={(event) => setDraft({ ...draft, planned: event.target.checked })} /><span>買う予定として残す</span></label>
           {draft.legacyNote && <label><span>元情報</span><textarea rows={2} value={draft.legacyNote} onChange={(event) => setDraft({ ...draft, legacyNote: event.target.value })} /></label>}
           <label><span>メモ</span><textarea rows={2} value={draft.memo} onChange={(event) => setDraft({ ...draft, memo: event.target.value })} placeholder="実家で確認、アニメで途中まで等" /></label>
@@ -413,9 +431,9 @@ function App() {
         </form>
       </Sheet>}
 
-      {modal?.kind === "read" && selected && <Sheet title="ここまで読んだ" onClose={() => setModal({ kind: "detail", id: selected.id })}><form className="quick-form" onSubmit={saveRead}><p>{selected.title}</p><label><span>何巻まで読みましたか？</span><input autoFocus type="number" min="1" value={quickValue} onChange={(event) => setQuickValue(event.target.value)} placeholder="未読なら空欄" /></label>{formError && <p className="form-error">{formError}</p>}<button className="primary" type="submit"><Check />更新する</button></form></Sheet>}
+      {modal?.kind === "read" && selected && <Sheet title="ここまで読んだ" onClose={() => setModal({ kind: "detail", id: selected.id })}><form className="quick-form" onSubmit={saveRead}><p>{selected.title}</p><button className="start-from-one" type="button" onClick={saveReadFromStart}><BookOpen />1巻から読む</button><label><span>何巻まで読みましたか？</span><input autoFocus type="number" min="0" value={quickValue} onChange={(event) => setQuickValue(event.target.value)} placeholder="1巻からなら0" /></label>{formError && <p className="form-error">{formError}</p>}<button className="primary" type="submit"><Check />更新する</button></form></Sheet>}
       {modal?.kind === "owned" && selected && <Sheet title="所持巻を編集" onClose={() => setModal({ kind: "detail", id: selected.id })}><form className="quick-form" onSubmit={saveOwned}><p>{selected.title}</p><label><span>持っている巻</span><input autoFocus value={quickValue} onChange={(event) => setQuickValue(event.target.value)} placeholder="例：1-5, 7-10" /></label><small>所持なしなら空欄で保存します。</small>{formError && <p className="form-error">{formError}</p>}<button className="primary" type="submit"><Check />更新する</button></form></Sheet>}
-      {modal?.kind === "import" && importPreview && <Sheet title="インポート確認" onClose={() => setModal(null)}>{importPreview.valid ? <><div className="import-stats"><span>読込<strong>{importPreview.incoming.length}</strong></span><span>新規<strong>{importPreview.newSeries.length}</strong></span><span>重複<strong>{importPreview.duplicateCount}</strong></span><span>警告<strong>{importPreview.titleWarnings.length + (importPreview.migratedV1 ? 1 : 0)}</strong></span></div>{importPreview.migratedV1 && <p className="warning-box">v1データです。旧巻表記は所持・既読へ確定せず、要確認の元情報として取り込みます。</p>}{importPreview.titleWarnings.map((warning) => <p className="warning-box" key={warning}>{warning}</p>)}<button className="primary full-button" onClick={applyImport}><Upload />新規{importPreview.newSeries.length}作品を追加</button></> : importPreview.errors.map((error) => <p className="form-error" key={error}>{error}</p>)}</Sheet>}
+      {modal?.kind === "import" && importPreview && <Sheet title="インポート確認" onClose={() => setModal(null)}>{importPreview.valid ? <><div className="import-stats"><span>読込<strong>{importPreview.incoming.length}</strong></span><span>更新<strong>{importPreview.updatedSeries.length}</strong></span><span>新規<strong>{importPreview.newSeries.length}</strong></span><span>変更なし<strong>{importPreview.unchangedCount}</strong></span><span>警告<strong>{importPreview.titleWarnings.length + (importPreview.migratedV1 ? 1 : 0)}</strong></span></div>{importPreview.migratedV1 && <p className="warning-box">v1データです。旧巻表記は所持・既読へ確定せず、要確認の元情報として取り込みます。</p>}{importPreview.titleWarnings.map((warning) => <p className="warning-box" key={warning}>{warning}</p>)}<button className="primary full-button" onClick={applyImport}><Upload />{importPreview.updatedSeries.length}作品を更新・{importPreview.newSeries.length}作品を追加</button></> : importPreview.errors.map((error) => <p className="form-error" key={error}>{error}</p>)}</Sheet>}
 
       {undo && <div className="snackbar"><span>{undo.message}</span><button onClick={() => { setSeries(undo.before); setUndo(null); }}><RotateCcw />元に戻す</button></div>}
     </div>
