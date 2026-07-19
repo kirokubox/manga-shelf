@@ -18,11 +18,13 @@ export interface MangaSeries {
   readProgressKnown: boolean;
   readUpTo: number | null;
   finishedAt: string | null;
+  everCompleted: boolean;
   ownershipKnown: boolean;
   ownedMedium: OwnedMedium;
   paperLocation: PaperLocation;
   ownedRanges: VolumeRange[];
   planned: boolean;
+  anilistId: number | null;
   legacyNote: string;
   memo: string;
   createdAt: string;

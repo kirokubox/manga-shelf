@@ -71,13 +71,6 @@ export function missingRanges(series: MangaSeries): VolumeRange[] {
 
 export const latestOwnedVolume = (series: MangaSeries) => Math.max(0, ...series.ownedRanges.map((range) => range.to));
 
-export function nextOwnedCandidate(series: MangaSeries): number | null {
-  if (!series.ownershipKnown) return null;
-  const next = latestOwnedVolume(series) + 1;
-  if (series.publicationStatus === "completed" && series.totalVolumes && next > series.totalVolumes) return null;
-  return next;
-}
-
 export function remainingVolumes(series: MangaSeries): number | null {
   if (series.publicationStatus !== "completed" || !series.totalVolumes || !series.readProgressKnown) return null;
   return Math.max(series.totalVolumes - (series.readUpTo ?? 0), 0);
@@ -88,6 +81,11 @@ export const isFullyRead = (series: MangaSeries) =>
   Boolean(series.totalVolumes) &&
   series.readProgressKnown &&
   (series.readUpTo ?? 0) >= (series.totalVolumes ?? 0);
+
+export const isRereading = (series: MangaSeries) =>
+  series.everCompleted && series.readProgressKnown && !isFullyRead(series);
+
+export const sortKey = (series: MangaSeries) => series.kana || series.title;
 
 export const needsReview = (series: MangaSeries) =>
   !series.readProgressKnown || !series.ownershipKnown || series.publicationStatus === "unknown" ||
@@ -117,24 +115,37 @@ function normalizeV2Series(value: unknown): MangaSeries | null {
   }).filter(Boolean) as VolumeRange[] : [];
   const createdAt = asText(item.createdAt) || now();
   const medium = normalizeOwnedMedium(item.ownedMedium);
+  const publicationStatus = normalizePublicationStatus(item.publicationStatus);
+  const totalVolumes = asPositiveInt(item.totalVolumes);
+  const readProgressKnown = item.readProgressKnown === true;
+  const readUpTo = asNonNegativeInt(item.readUpTo);
+  const finishedAt = asNullableText(item.finishedAt);
+  const edition = asNullableText(item.editionLabel);
+  const rawMemo = asText(item.memo).trim();
+  const memo = edition && !rawMemo.includes(`版：${edition}`)
+    ? [`版：${edition}`, rawMemo].filter(Boolean).join(" / ")
+    : rawMemo;
   return {
     id: asText(item.id) || crypto.randomUUID(),
     title,
-    kana: kana || title,
-    editionLabel: asNullableText(item.editionLabel),
-    publicationStatus: normalizePublicationStatus(item.publicationStatus),
-    totalVolumes: asPositiveInt(item.totalVolumes),
+    kana,
+    editionLabel: null,
+    publicationStatus,
+    totalVolumes,
     bibliographyCheckedAt: asNullableText(item.bibliographyCheckedAt),
-    readProgressKnown: item.readProgressKnown === true,
-    readUpTo: asNonNegativeInt(item.readUpTo),
-    finishedAt: asNullableText(item.finishedAt),
+    readProgressKnown,
+    readUpTo,
+    finishedAt,
+    everCompleted: item.everCompleted === true || finishedAt !== null ||
+      (publicationStatus === "completed" && totalVolumes !== null && readProgressKnown && (readUpTo ?? 0) >= totalVolumes),
     ownershipKnown: item.ownershipKnown === true,
     ownedMedium: medium,
     paperLocation: medium === "paper" ? normalizePaperLocation(item.paperLocation) : null,
     ownedRanges: normalizeRanges(ranges),
     planned: item.planned === true,
+    anilistId: asPositiveInt(item.anilistId),
     legacyNote: asText(item.legacyNote),
-    memo: asText(item.memo),
+    memo,
     createdAt,
     updatedAt: asText(item.updatedAt) || createdAt,
   };
@@ -163,7 +174,7 @@ function migrateV1Series(value: unknown): MangaSeries | null {
   return {
     id: asText(item.id) || crypto.randomUUID(),
     title,
-    kana: asText(item.kana).trim() || title,
+    kana: asText(item.kana).trim(),
     editionLabel: null,
     publicationStatus: normalizePublicationStatus(item.serialStatus),
     totalVolumes: asPositiveInt(item.totalVolumes),
@@ -171,11 +182,13 @@ function migrateV1Series(value: unknown): MangaSeries | null {
     readProgressKnown: false,
     readUpTo: null,
     finishedAt: null,
+    everCompleted: false,
     ownershipKnown: false,
     ownedMedium: null,
     paperLocation: null,
     ownedRanges: [],
     planned: item.shelfStatus === "planned",
+    anilistId: null,
     legacyNote: notes.join(" / "),
     memo: "",
     createdAt,
@@ -207,11 +220,11 @@ export const saveData = (series: MangaSeries[]) => localStorage.setItem(STORAGE_
 
 export function createMarkdown(series: MangaSeries[]): string {
   const lines = [`# マンガ棚`, "", `出力日: ${new Date().toLocaleDateString("ja-JP")}`, `作品数: ${series.length}`, ""];
-  [...series].sort((a, b) => a.kana.localeCompare(b.kana, "ja")).forEach((item) => {
+  [...series].sort((a, b) => sortKey(a).localeCompare(sortKey(b), "ja")).forEach((item) => {
     const remaining = remainingVolumes(item);
-    lines.push(`## ${item.title}${item.editionLabel ? `（${item.editionLabel}）` : ""}`);
+    lines.push(`## ${item.title}`);
     lines.push(`- 刊行: ${item.publicationStatus === "completed" ? `完結${item.totalVolumes ? `・全${item.totalVolumes}巻` : ""}` : item.publicationStatus === "ongoing" ? "連載中" : "要確認"}`);
-    lines.push(`- 既読: ${isFullyRead(item) ? "全巻読了" : item.readProgressKnown ? item.readUpTo ? `${item.readUpTo}巻まで` : "1巻から読む" : "要確認"}`);
+    lines.push(`- 既読: ${isFullyRead(item) ? "全巻読了" : item.readProgressKnown ? `${item.readUpTo ? `${item.readUpTo}巻まで` : "1巻から読む"}${isRereading(item) ? "（再読中・全巻読了済み）" : ""}` : "要確認"}`);
     if (remaining !== null) lines.push(`- 残り: ${remaining}巻`);
     lines.push(`- 所持: ${item.ownershipKnown ? item.ownedRanges.length ? formatRanges(item.ownedRanges) : "なし" : item.ownedMedium ? "巻数未入力" : "要確認"}`);
     if (item.finishedAt) lines.push(`- 全巻読了日: ${item.finishedAt}`);

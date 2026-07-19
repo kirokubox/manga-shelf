@@ -1,40 +1,43 @@
-import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
-  BookCheck, BookOpen, Check, ChevronRight, CircleHelp, Download, Home, LibraryBig,
-  Pencil, Plus, RotateCcw, Search, Settings, SlidersHorizontal, Trash2, Upload, X,
+  BookCheck, BookOpen, Check, CircleHelp, Download, Home, LibraryBig,
+  Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, ShoppingBag, SlidersHorizontal, Trash2, Upload,
 } from "lucide-react";
 import {
-  ACTIVE_VIEW_KEY, createMarkdown, formatRanges, isFullyRead, latestOwnedVolume, loadData, missingRanges,
-  needsReview, nextOwnedCandidate, normalizeData, parseRanges, remainingVolumes, saveData,
+  ACTIVE_VIEW_KEY, createMarkdown, formatRanges, isFullyRead, isRereading, loadData, missingRanges,
+  needsReview, normalizeData, parseRanges, remainingVolumes, saveData, sortKey,
 } from "./data";
 import type { MangaSeries, OwnedMedium, PublicationStatus, UndoState } from "./types";
+import { Sheet } from "./components/Sheet";
+import { ShelfCard, ShoppingCard } from "./components/cards";
+import { AddSheet, type AddResult } from "./components/AddSheet";
+import { BiblioSheet, type BiblioChange } from "./components/BiblioSheet";
+import { mediumLabel, publicationLabel } from "./labels";
 import "./styles.css";
 
-type View = "shelf" | "settings";
-type Filter = "all" | "continue" | "remaining" | "owned" | "missing" | "finished" | "planned" | "review";
-type SortOrder = "name" | "owned_name";
+type View = "shelf" | "shopping" | "settings";
+type Filter = "all" | "continue" | "finished";
 type Modal =
   | { kind: "detail"; id: string }
-  | { kind: "edit"; id: string | null; reviewMode?: boolean }
+  | { kind: "edit"; id: string; reviewMode?: boolean }
   | { kind: "read"; id: string }
   | { kind: "owned"; id: string }
+  | { kind: "add" }
   | { kind: "import" }
+  | { kind: "biblio" }
   | null;
 
 interface Draft {
   title: string;
   kana: string;
-  editionLabel: string;
   publicationStatus: PublicationStatus;
   totalVolumes: string;
-  bibliographyCheckedAt: string;
   readProgressKnown: boolean;
   readUpTo: string;
   ownershipKnown: boolean;
   ownedMedium: OwnedMedium;
   ownedRanges: string;
   planned: boolean;
-  legacyNote: string;
   memo: string;
 }
 
@@ -53,38 +56,22 @@ const today = () => new Date().toISOString().slice(0, 10);
 const now = () => new Date().toISOString();
 const normalizedTitle = (value: string) => value.normalize("NFKC").toLocaleLowerCase("ja").replace(/[\s・!！:：]/g, "");
 
-const mediumLabel: Record<Exclude<OwnedMedium, null>, string> = {
-  paper: "紙",
-  kindle: "Kindle",
-  jump_plus: "少年ジャンプ＋",
+const loadView = (): View => {
+  const stored = localStorage.getItem(ACTIVE_VIEW_KEY);
+  return stored === "shopping" || stored === "settings" ? stored : "shelf";
 };
-
-const publicationLabel: Record<PublicationStatus, string> = {
-  ongoing: "連載中",
-  completed: "完結",
-  unknown: "刊行状況 要確認",
-};
-
-const emptyDraft = (): Draft => ({
-  title: "", kana: "", editionLabel: "", publicationStatus: "unknown", totalVolumes: "",
-  bibliographyCheckedAt: "", readProgressKnown: false, readUpTo: "", ownershipKnown: false,
-  ownedMedium: null, ownedRanges: "", planned: false, legacyNote: "", memo: "",
-});
 
 const draftFromSeries = (item: MangaSeries): Draft => ({
   title: item.title,
   kana: item.kana,
-  editionLabel: item.editionLabel ?? "",
   publicationStatus: item.publicationStatus,
   totalVolumes: item.totalVolumes?.toString() ?? "",
-  bibliographyCheckedAt: item.bibliographyCheckedAt ?? "",
   readProgressKnown: item.readProgressKnown,
   readUpTo: item.readUpTo?.toString() ?? "",
   ownershipKnown: item.ownershipKnown,
   ownedMedium: item.ownedMedium,
   ownedRanges: formatRanges(item.ownedRanges),
   planned: item.planned,
-  legacyNote: item.legacyNote,
   memo: item.memo,
 });
 
@@ -97,79 +84,14 @@ function downloadText(filename: string, content: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
-function Sheet({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
-  useEffect(() => {
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.body.style.overflow = previous;
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [onClose]);
-  return (
-    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="modal-panel" role="dialog" aria-modal="true" aria-label={title}>
-        <div className="sheet-handle" />
-        <header className="modal-header"><h2>{title}</h2><button className="icon-button" onClick={onClose} aria-label="閉じる"><X /></button></header>
-        <div className="modal-body">{children}</div>
-      </section>
-    </div>
-  );
-}
-
-function SeriesCard({ item, onOpen }: { item: MangaSeries; onOpen: () => void }) {
-  const remaining = remainingVolumes(item);
-  const fullyRead = isFullyRead(item);
-  const missing = missingRanges(item);
-  const nextOwned = nextOwnedCandidate(item);
-  return (
-    <button className="series-card" onClick={onOpen}>
-      <div className="card-top">
-        <div>
-          <h2>{item.title}</h2>
-          {item.editionLabel && <p className="edition">{item.editionLabel}</p>}
-        </div>
-        <ChevronRight className="chevron" aria-hidden="true" />
-      </div>
-      <div className="badges">
-        <span className={`badge ${item.publicationStatus}`}>{publicationLabel[item.publicationStatus]}{item.totalVolumes ? `・全${item.totalVolumes}巻` : ""}</span>
-        {item.ownedMedium && <span className="badge quiet">{mediumLabel[item.ownedMedium]}</span>}
-        {item.planned && <span className="badge planned">買う予定</span>}
-        {needsReview(item) && <span className="badge review">要確認</span>}
-      </div>
-      <div className="answer-grid">
-        <div className="answer primary-answer">
-          <span>読む</span>
-          <strong>{fullyRead ? "全巻読了済み" : item.readProgressKnown ? item.readUpTo === 0 ? "1巻から読む" : `${(item.readUpTo ?? 0) + 1}巻から` : "要確認"}</strong>
-          {item.readProgressKnown && !fullyRead && <small>{item.readUpTo ? `${item.readUpTo}巻まで読了` : "最初から読みたい"}</small>}
-        </div>
-        <div className="answer">
-          <span>残り</span>
-          <strong>{item.publicationStatus === "completed" ? remaining === null ? "要確認" : `${remaining}巻` : "—"}</strong>
-          {item.finishedAt && <small>{item.finishedAt.replaceAll("-", "/")} 読了</small>}
-        </div>
-      </div>
-      <div className="ownership-line">
-        <span>所持</span>
-        <strong>{item.ownershipKnown ? item.ownedRanges.length ? formatRanges(item.ownedRanges) : "なし" : item.ownedMedium ? "巻数未入力" : "要確認"}</strong>
-      </div>
-      {item.ownershipKnown && missing.length > 0 && <p className="sub-line">未所持：{formatRanges(missing)}</p>}
-      {item.ownershipKnown && nextOwned !== null && <p className="sub-line">次にそろえる候補：{nextOwned}巻</p>}
-    </button>
-  );
-}
-
 function App() {
   const [series, setSeries] = useState<MangaSeries[]>(() => loadData().series);
-  const [view, setView] = useState<View>(() => localStorage.getItem(ACTIVE_VIEW_KEY) === "settings" ? "settings" : "shelf");
+  const [view, setView] = useState<View>(loadView);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("name");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [modal, setModal] = useState<Modal>(null);
-  const [draft, setDraft] = useState<Draft>(emptyDraft);
+  const [draft, setDraft] = useState<Draft | null>(null);
   const [formError, setFormError] = useState("");
   const [quickValue, setQuickValue] = useState("");
   const [undo, setUndo] = useState<UndoState | null>(null);
@@ -185,30 +107,22 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [undo]);
 
-  const reviewItems = useMemo(() => series.filter(needsReview).sort((a, b) => a.kana.localeCompare(b.kana, "ja")), [series]);
+  const reviewItems = useMemo(() => series.filter(needsReview).sort((a, b) => sortKey(a).localeCompare(sortKey(b), "ja")), [series]);
+  const biblioTargets = useMemo(() => series.filter((item) => item.anilistId !== null && item.publicationStatus === "ongoing"), [series]);
+
   const visibleSeries = useMemo(() => {
     const term = query.trim().normalize("NFKC").toLocaleLowerCase("ja");
     return [...series]
+      .filter((item) => view !== "shopping" || item.planned)
       .filter((item) => !term || item.title.normalize("NFKC").toLocaleLowerCase("ja").includes(term) || item.kana.normalize("NFKC").toLocaleLowerCase("ja").includes(term))
       .filter((item) => {
+        if (view === "shopping") return true;
         if (filter === "continue") return item.readProgressKnown && !isFullyRead(item);
-        if (filter === "remaining") return remainingVolumes(item) !== null && remainingVolumes(item)! > 0;
-        if (filter === "owned") return Boolean(item.ownedMedium) || item.ownedRanges.length > 0;
-        if (filter === "missing") return missingRanges(item).length > 0;
         if (filter === "finished") return isFullyRead(item);
-        if (filter === "planned") return item.planned;
-        if (filter === "review") return needsReview(item);
         return true;
       })
-      .sort((a, b) => {
-        if (sortOrder === "owned_name") {
-          const aOwned = Boolean(a.ownedMedium) || a.ownedRanges.length > 0;
-          const bOwned = Boolean(b.ownedMedium) || b.ownedRanges.length > 0;
-          if (aOwned !== bOwned) return aOwned ? -1 : 1;
-        }
-        return a.kana.localeCompare(b.kana, "ja");
-      });
-  }, [series, query, filter, sortOrder]);
+      .sort((a, b) => sortKey(a).localeCompare(sortKey(b), "ja"));
+  }, [series, query, filter, view]);
 
   const selected = modal && "id" in modal ? series.find((item) => item.id === modal.id) ?? null : null;
 
@@ -217,41 +131,76 @@ function App() {
     setSeries(next);
   };
 
-  const openEdit = (item: MangaSeries | null, reviewMode = false) => {
-    setDraft(item ? draftFromSeries(item) : emptyDraft());
+  const openEdit = (item: MangaSeries, reviewMode = false) => {
+    setDraft(draftFromSeries(item));
     setFormError("");
-    setModal({ kind: "edit", id: item?.id ?? null, reviewMode });
+    setModal({ kind: "edit", id: item.id, reviewMode });
+  };
+
+  const addSeries = ({ title, kana, entry }: AddResult) => {
+    const timestamp = now();
+    const item: MangaSeries = {
+      id: crypto.randomUUID(),
+      title,
+      kana,
+      editionLabel: null,
+      publicationStatus: entry?.status ?? "unknown",
+      totalVolumes: entry?.volumes ?? null,
+      bibliographyCheckedAt: entry ? today() : null,
+      readProgressKnown: false,
+      readUpTo: null,
+      finishedAt: null,
+      everCompleted: false,
+      ownershipKnown: false,
+      ownedMedium: null,
+      paperLocation: null,
+      ownedRanges: [],
+      planned: false,
+      anilistId: entry?.id ?? null,
+      legacyNote: "",
+      memo: "",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    replaceSeries([...series, item], `${title}を追加しました`);
+    setModal({ kind: "detail", id: item.id });
   };
 
   const saveDraft = (event: FormEvent) => {
     event.preventDefault();
+    if (!draft || modal?.kind !== "edit") return;
+    const existing = series.find((item) => item.id === modal.id);
+    if (!existing) return;
     const title = draft.title.trim();
-    const kana = draft.kana.trim();
     const totalVolumes = draft.totalVolumes ? Number(draft.totalVolumes) : null;
     const readUpTo = draft.readUpTo ? Number(draft.readUpTo) : null;
     const ranges = parseRanges(draft.ownedRanges);
-    if (!title || !kana) return setFormError("タイトルとよみがなを入力してください");
+    if (!title) return setFormError("タイトルを入力してください");
     if (draft.publicationStatus === "completed" && (!totalVolumes || totalVolumes < 1)) return setFormError("完結作品は全巻数を入力してください");
     if (readUpTo !== null && (!Number.isInteger(readUpTo) || readUpTo < 0)) return setFormError("既読巻は0以上の整数で入力してください");
     if (ranges === null) return setFormError("所持巻は「1-5, 7-10」の形式で入力してください");
     if (draft.ownershipKnown && ranges.length > 0 && !draft.ownedMedium) return setFormError("所持媒体を選んでください");
-    const existing = modal?.kind === "edit" && modal.id ? series.find((item) => item.id === modal.id) : null;
-    const timestamp = now();
+    const nextReadUpTo = draft.readProgressKnown ? readUpTo : null;
     const item: MangaSeries = {
-      id: existing?.id ?? crypto.randomUUID(), title, kana, editionLabel: draft.editionLabel.trim() || null,
-      publicationStatus: draft.publicationStatus, totalVolumes,
-      bibliographyCheckedAt: draft.bibliographyCheckedAt || null,
-      readProgressKnown: draft.readProgressKnown, readUpTo: draft.readProgressKnown ? readUpTo : null,
-      finishedAt: existing?.finishedAt && draft.publicationStatus === "completed" && totalVolumes !== null && readUpTo !== null && readUpTo >= totalVolumes ? existing.finishedAt : null,
-      ownershipKnown: draft.ownershipKnown, ownedMedium: draft.ownedMedium,
+      ...existing,
+      title,
+      kana: draft.kana.trim(),
+      publicationStatus: draft.publicationStatus,
+      totalVolumes,
+      readProgressKnown: draft.readProgressKnown,
+      readUpTo: nextReadUpTo,
+      everCompleted: existing.everCompleted ||
+        (draft.publicationStatus === "completed" && totalVolumes !== null && draft.readProgressKnown && nextReadUpTo !== null && nextReadUpTo >= totalVolumes),
+      ownershipKnown: draft.ownershipKnown,
+      ownedMedium: draft.ownedMedium,
       paperLocation: null,
-      ownedRanges: draft.ownershipKnown ? ranges : [], planned: draft.planned,
-      legacyNote: draft.legacyNote.trim(), memo: draft.memo.trim(),
-      createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp,
+      ownedRanges: draft.ownershipKnown ? ranges : [],
+      planned: draft.planned,
+      memo: draft.memo.trim(),
+      updatedAt: now(),
     };
-    const next = existing ? series.map((entry) => entry.id === item.id ? item : entry) : [...series, item];
-    replaceSeries(next, existing ? `${title}の変更を保存しました` : `${title}を追加しました`);
-    const nextReview = modal?.kind === "edit" && modal.reviewMode ? reviewItems.find((entry) => entry.id !== item.id) : null;
+    replaceSeries(series.map((entry) => entry.id === item.id ? item : entry), `${title}の変更を保存しました`);
+    const nextReview = modal.reviewMode ? reviewItems.find((entry) => entry.id !== item.id) : null;
     if (nextReview) openEdit(nextReview, true);
     else setModal({ kind: "detail", id: item.id });
   };
@@ -261,14 +210,36 @@ function App() {
     if (!selected) return;
     const value = quickValue ? Number(quickValue) : null;
     if (value !== null && (!Number.isInteger(value) || value < 0)) return setFormError("0以上の整数で入力してください");
-    replaceSeries(series.map((item) => item.id === selected.id ? { ...item, readProgressKnown: true, readUpTo: value, finishedAt: null, updatedAt: now() } : item), `${selected.title}の既読巻を更新しました`);
+    replaceSeries(series.map((item) => item.id === selected.id ? {
+      ...item,
+      readProgressKnown: true,
+      readUpTo: value,
+      everCompleted: item.everCompleted ||
+        (item.publicationStatus === "completed" && item.totalVolumes !== null && value !== null && value >= item.totalVolumes),
+      updatedAt: now(),
+    } : item), `${selected.title}の既読巻を更新しました`);
     setModal({ kind: "detail", id: selected.id });
   };
 
   const saveReadFromStart = () => {
     if (!selected) return;
-    replaceSeries(series.map((item) => item.id === selected.id ? { ...item, readProgressKnown: true, readUpTo: 0, finishedAt: null, updatedAt: now() } : item), `${selected.title}を1巻から読む作品にしました`);
+    replaceSeries(series.map((item) => item.id === selected.id ? { ...item, readProgressKnown: true, readUpTo: 0, updatedAt: now() } : item), `${selected.title}を1巻から読む作品にしました`);
     setModal({ kind: "detail", id: selected.id });
+  };
+
+  const markFinished = (item: MangaSeries) => {
+    if (item.publicationStatus !== "completed" || !item.totalVolumes) {
+      setMessage("先に刊行状況を完結にし、全巻数を入力してください");
+      return;
+    }
+    replaceSeries(series.map((entry) => entry.id === item.id ? {
+      ...entry,
+      readProgressKnown: true,
+      readUpTo: item.totalVolumes,
+      finishedAt: entry.finishedAt ?? today(),
+      everCompleted: true,
+      updatedAt: now(),
+    } : entry), `${item.title}を全巻読了にしました`);
   };
 
   const saveOwned = (event: FormEvent) => {
@@ -281,17 +252,19 @@ function App() {
     setModal({ kind: "detail", id: selected.id });
   };
 
-  const markFinished = (item: MangaSeries) => {
-    if (item.publicationStatus !== "completed" || !item.totalVolumes) {
-      setMessage("先に刊行状況を完結にし、全巻数を入力してください");
-      return;
-    }
-    replaceSeries(series.map((entry) => entry.id === item.id ? { ...entry, readProgressKnown: true, readUpTo: item.totalVolumes, finishedAt: today(), updatedAt: now() } : entry), `${item.title}を全巻読了にしました`);
-  };
-
   const deleteSeries = (item: MangaSeries) => {
     if (!window.confirm(`「${item.title}」を削除しますか？`)) return;
     replaceSeries(series.filter((entry) => entry.id !== item.id), `${item.title}を削除しました`);
+    setModal(null);
+  };
+
+  const applyBiblio = (changes: BiblioChange[]) => {
+    const byId = new Map(changes.map((change) => [change.id, change]));
+    replaceSeries(series.map((item) => {
+      const change = byId.get(item.id);
+      return change ? { ...item, publicationStatus: change.publicationStatus, totalVolumes: change.totalVolumes, bibliographyCheckedAt: today(), updatedAt: now() } : item;
+    }), `${changes.length}作品の書誌を更新しました`);
+    setMessage(`${changes.length}作品の書誌を更新しました`);
     setModal(null);
   };
 
@@ -333,22 +306,17 @@ function App() {
   };
 
   const filters: { id: Filter; label: string }[] = [
-    { id: "all", label: "すべて" }, { id: "continue", label: "続きあり" }, { id: "remaining", label: "残りあり" },
-    { id: "owned", label: "所持あり" }, { id: "missing", label: "未所持あり" }, { id: "finished", label: "読了" },
-    { id: "planned", label: "買う予定" }, { id: "review", label: `要確認 ${reviewItems.length}` },
+    { id: "all", label: "すべて" }, { id: "continue", label: "続きあり" }, { id: "finished", label: "読了" },
   ];
 
   return (
     <div className="app-shell">
       <main>
-        {view === "shelf" ? <>
+        {view === "shelf" && <>
           <header className="app-header">
-            <div><p className="eyebrow">どこまで読んだ？ 何巻持ってる？</p><h1>マンガ棚</h1></div>
-            <button className="round-add" onClick={() => openEdit(null)} aria-label="作品を追加"><Plus /></button>
+            <div><p className="eyebrow">次は何巻から読む？</p><h1>マンガ棚</h1></div>
+            <button className="round-add" onClick={() => setModal({ kind: "add" })} aria-label="作品を追加"><Plus /></button>
           </header>
-          {reviewItems.length > 0 && <button className="review-banner" onClick={() => openEdit(reviewItems[0], true)}>
-            <CircleHelp /><span><strong>要確認が{reviewItems.length}作品あります</strong><small>使う作品から少しずつ整理できます</small></span><ChevronRight />
-          </button>}
           <div className="search-row">
             <label className="search-box"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="作品名・よみがなで検索" /></label>
             <button className={`filter-button ${filtersOpen ? "active" : ""}`} onClick={() => setFiltersOpen(!filtersOpen)} aria-label="絞り込み"><SlidersHorizontal /></button>
@@ -356,17 +324,38 @@ function App() {
           {filtersOpen && <div className="filter-chips">{filters.map((item) => <button key={item.id} className={filter === item.id ? "active" : ""} onClick={() => setFilter(item.id)}>{item.label}</button>)}</div>}
           <div className="result-meta">
             <span>{visibleSeries.length}作品</span>
-            <div className="result-tools">
-              {filter !== "all" && <button onClick={() => setFilter("all")}>絞り込み解除</button>}
-              <label className="sort-select"><span>並び順</span><select value={sortOrder} onChange={(event) => setSortOrder(event.target.value as SortOrder)}><option value="name">名前順</option><option value="owned_name">所持あり→名前順</option></select></label>
-            </div>
+            {filter !== "all" && <button onClick={() => setFilter("all")}>絞り込み解除</button>}
           </div>
           <div className="series-list">
-            {visibleSeries.map((item) => <SeriesCard key={item.id} item={item} onOpen={() => setModal({ kind: "detail", id: item.id })} />)}
+            {visibleSeries.map((item) => <ShelfCard key={item.id} item={item} onOpen={() => setModal({ kind: "detail", id: item.id })} />)}
             {visibleSeries.length === 0 && <div className="empty-state"><LibraryBig /><h2>該当する作品はありません</h2><p>検索語や絞り込みを変えてください。</p></div>}
           </div>
-        </> : <>
-          <header className="app-header"><div><p className="eyebrow">データを安全に持ち出す</p><h1>設定</h1></div></header>
+        </>}
+
+        {view === "shopping" && <>
+          <header className="app-header">
+            <div><p className="eyebrow">何巻持ってる？ 何巻が抜けてる？</p><h1>買い物</h1></div>
+          </header>
+          <div className="search-row">
+            <label className="search-box"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="買う予定の作品から検索" /></label>
+          </div>
+          <div className="result-meta"><span>買う予定 {visibleSeries.length}作品</span></div>
+          <div className="series-list">
+            {visibleSeries.map((item) => <ShoppingCard key={item.id} item={item} onOpen={() => setModal({ kind: "detail", id: item.id })} />)}
+            {visibleSeries.length === 0 && <div className="empty-state"><ShoppingBag /><h2>買う予定の作品はありません</h2><p>作品の詳細画面で「買う予定」をオンにすると、ここに並びます。</p></div>}
+          </div>
+        </>}
+
+        {view === "settings" && <>
+          <header className="app-header"><div><p className="eyebrow">データの管理と整理</p><h1>設定</h1></div></header>
+          <section className="settings-card">
+            <h2>書誌の一括確認</h2><p>連載中の作品をAniListへ照会し、完結や巻数の変化を確認します。対象は書誌候補から登録した作品です。</p>
+            <button onClick={() => setModal({ kind: "biblio" })} disabled={biblioTargets.length === 0}><RefreshCw />連載中{biblioTargets.length}作品を確認する</button>
+          </section>
+          <section className="settings-card">
+            <h2>要確認の整理</h2><p>読書位置や所持が未確認の作品を、1作品ずつ確認できます。急がなくても、使う作品から埋めれば大丈夫です。</p>
+            <button onClick={() => reviewItems[0] && openEdit(reviewItems[0], true)} disabled={reviewItems.length === 0}><CircleHelp />{reviewItems.length === 0 ? "要確認はありません" : `要確認を整理する（${reviewItems.length}作品）`}</button>
+          </section>
           <section className="settings-card">
             <h2>バックアップ</h2><p>JSONは復元用、Markdownは読み返し用です。</p>
             <div className="settings-actions">
@@ -379,19 +368,20 @@ function App() {
             <button onClick={() => fileInputRef.current?.click()}><Upload />JSONを選ぶ</button>
             <input ref={fileInputRef} hidden type="file" accept="application/json,.json" onChange={readImport} />
           </section>
-          <section className="settings-card compact-stats"><h2>現在のデータ</h2><div><span>全作品<strong>{series.length}</strong></span><span>要確認<strong>{reviewItems.length}</strong></span><span>全巻読了<strong>{series.filter(isFullyRead).length}</strong></span></div></section>
+          <section className="settings-card compact-stats"><h2>現在のデータ</h2><div><span>全作品<strong>{series.length}</strong></span><span>要確認<strong>{reviewItems.length}</strong></span><span>全巻読了<strong>{series.filter((item) => item.everCompleted || isFullyRead(item)).length}</strong></span></div></section>
           {message && <p className="inline-message">{message}</p>}
         </>}
       </main>
 
       <nav className="bottom-nav">
         <button className={view === "shelf" ? "active" : ""} onClick={() => setView("shelf")}><Home /><span>棚</span></button>
+        <button className={view === "shopping" ? "active" : ""} onClick={() => setView("shopping")}><ShoppingBag /><span>買い物</span></button>
         <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}><Settings /><span>設定</span></button>
       </nav>
 
       {modal?.kind === "detail" && selected && <Sheet title={selected.title} onClose={() => setModal(null)}>
         <div className="detail-summary">
-          <div><span>次に読む</span><strong>{isFullyRead(selected) ? "全巻読了済み" : selected.readProgressKnown ? selected.readUpTo === 0 ? "1巻から読む" : `${(selected.readUpTo ?? 0) + 1}巻から` : "要確認"}</strong></div>
+          <div><span>次に読む</span><strong>{isFullyRead(selected) ? "全巻読了済み" : selected.readProgressKnown ? `${selected.readUpTo ? `${selected.readUpTo + 1}巻から` : "1巻から読む"}${isRereading(selected) ? "（再読）" : ""}` : "要確認"}</strong></div>
           <div><span>残り</span><strong>{selected.publicationStatus === "completed" ? remainingVolumes(selected) === null ? "要確認" : `${remainingVolumes(selected)}巻` : "—"}</strong></div>
         </div>
         <div className="quick-actions">
@@ -401,38 +391,41 @@ function App() {
         </div>
         <dl className="detail-list">
           <div><dt>刊行</dt><dd>{publicationLabel[selected.publicationStatus]}{selected.totalVolumes ? `・全${selected.totalVolumes}巻` : ""}</dd></div>
-          <div><dt>既読</dt><dd>{selected.readProgressKnown ? selected.readUpTo ? `${selected.readUpTo}巻まで` : "1巻から読む" : "要確認"}</dd></div>
+          <div><dt>既読</dt><dd>{selected.readProgressKnown ? `${selected.readUpTo ? `${selected.readUpTo}巻まで` : "1巻から読む"}${isRereading(selected) ? "（再読中）" : ""}` : "要確認"}</dd></div>
+          {selected.everCompleted && <div><dt>読了記録</dt><dd>全巻読了済み{selected.finishedAt ? `（${selected.finishedAt.replaceAll("-", "/")}）` : ""}</dd></div>}
           <div><dt>所持</dt><dd>{selected.ownershipKnown ? selected.ownedRanges.length ? formatRanges(selected.ownedRanges) : "なし" : selected.ownedMedium ? "巻数未入力" : "要確認"}</dd></div>
+          {selected.ownershipKnown && selected.planned && missingRanges(selected).length > 0 && <div><dt>未所持</dt><dd>{formatRanges(missingRanges(selected))}</dd></div>}
           <div><dt>媒体</dt><dd>{selected.ownedMedium ? mediumLabel[selected.ownedMedium] : "—"}</dd></div>
+          <div><dt>買う予定</dt><dd>{selected.planned ? "あり（買い物タブに表示）" : "なし"}</dd></div>
           {selected.legacyNote && <div><dt>元情報</dt><dd>{selected.legacyNote}</dd></div>}
           {selected.memo && <div><dt>メモ</dt><dd>{selected.memo}</dd></div>}
         </dl>
         <div className="detail-footer"><button onClick={() => openEdit(selected)}><Pencil />すべて編集</button><button className="danger-text" onClick={() => deleteSeries(selected)}><Trash2 />削除</button></div>
       </Sheet>}
 
-      {modal?.kind === "edit" && <Sheet title={modal.id ? modal.reviewMode ? "作品を確認" : "作品を編集" : "作品を追加"} onClose={() => setModal(null)}>
+      {modal?.kind === "edit" && draft && <Sheet title={modal.reviewMode ? "作品を確認" : "作品を編集"} onClose={() => setModal(null)}>
         {modal.reviewMode && <p className="review-progress">要確認 {reviewItems.length}作品・保存すると次へ進みます</p>}
         <form className="edit-form" onSubmit={saveDraft}>
           <label><span>タイトル</span><input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
-          <label><span>よみがな</span><input value={draft.kana} onChange={(event) => setDraft({ ...draft, kana: event.target.value })} placeholder="ひらがな" /></label>
-          <label><span>版（必要な作品だけ）</span><input value={draft.editionLabel} onChange={(event) => setDraft({ ...draft, editionLabel: event.target.value })} placeholder="通常版、完全版など" /></label>
+          <label><span>よみがな（任意）</span><input value={draft.kana} onChange={(event) => setDraft({ ...draft, kana: event.target.value })} placeholder="ひらがな・未入力ならタイトルで並びます" /></label>
           <div className="two-columns">
             <label><span>刊行状況</span><select value={draft.publicationStatus} onChange={(event) => setDraft({ ...draft, publicationStatus: event.target.value as PublicationStatus })}><option value="unknown">要確認</option><option value="ongoing">連載中</option><option value="completed">完結</option></select></label>
             <label><span>全巻数</span><input type="number" min="1" value={draft.totalVolumes} onChange={(event) => setDraft({ ...draft, totalVolumes: event.target.value })} placeholder="完結作品は必須" /></label>
           </div>
-          <label><span>書誌確認日</span><input type="date" value={draft.bibliographyCheckedAt} onChange={(event) => setDraft({ ...draft, bibliographyCheckedAt: event.target.value })} /></label>
           <fieldset><legend>読書状況</legend><label className="check-row"><input type="checkbox" checked={draft.readProgressKnown} onChange={(event) => setDraft({ ...draft, readProgressKnown: event.target.checked })} /><span>どこまで読んだか確認済み</span></label>{draft.readProgressKnown && <label><span>何巻まで読んだ（1巻からなら0）</span><input type="number" min="0" value={draft.readUpTo} onChange={(event) => setDraft({ ...draft, readUpTo: event.target.value })} placeholder="1巻から読むなら0" /></label>}</fieldset>
           <fieldset><legend>所持状況</legend><label className="check-row"><input type="checkbox" checked={draft.ownershipKnown} onChange={(event) => setDraft({ ...draft, ownershipKnown: event.target.checked })} /><span>所持巻を確認済み</span></label><label><span>媒体</span><select value={draft.ownedMedium ?? ""} onChange={(event) => setDraft({ ...draft, ownedMedium: (event.target.value || null) as OwnedMedium })}><option value="">所持なし／要確認</option><option value="paper">紙</option><option value="kindle">Kindle</option><option value="jump_plus">少年ジャンプ＋</option></select></label>{draft.ownershipKnown && <label><span>所持巻</span><input value={draft.ownedRanges} onChange={(event) => setDraft({ ...draft, ownedRanges: event.target.value })} placeholder="例：1-5, 7-10（所持なしは空欄）" /></label>}</fieldset>
-          <label className="check-row"><input type="checkbox" checked={draft.planned} onChange={(event) => setDraft({ ...draft, planned: event.target.checked })} /><span>買う予定として残す</span></label>
-          {draft.legacyNote && <label><span>元情報</span><textarea rows={2} value={draft.legacyNote} onChange={(event) => setDraft({ ...draft, legacyNote: event.target.value })} /></label>}
+          <label className="check-row"><input type="checkbox" checked={draft.planned} onChange={(event) => setDraft({ ...draft, planned: event.target.checked })} /><span>買う予定として残す（買い物タブに表示）</span></label>
           <label><span>メモ</span><textarea rows={2} value={draft.memo} onChange={(event) => setDraft({ ...draft, memo: event.target.value })} placeholder="実家で確認、アニメで途中まで等" /></label>
           {formError && <p className="form-error">{formError}</p>}
           <div className="sticky-submit"><button type="submit" className="primary"><Check />保存{modal.reviewMode ? "して次へ" : ""}</button>{modal.reviewMode && <button type="button" onClick={() => { const next = reviewItems.find((item) => item.id !== modal.id); next ? openEdit(next, true) : setModal(null); }}>後で確認</button>}</div>
         </form>
       </Sheet>}
 
-      {modal?.kind === "read" && selected && <Sheet title="ここまで読んだ" onClose={() => setModal({ kind: "detail", id: selected.id })}><form className="quick-form" onSubmit={saveRead}><p>{selected.title}</p><button className="start-from-one" type="button" onClick={saveReadFromStart}><BookOpen />1巻から読む</button><label><span>何巻まで読みましたか？</span><input autoFocus type="number" min="0" value={quickValue} onChange={(event) => setQuickValue(event.target.value)} placeholder="1巻からなら0" /></label>{formError && <p className="form-error">{formError}</p>}<button className="primary" type="submit"><Check />更新する</button></form></Sheet>}
+      {modal?.kind === "add" && <AddSheet onSave={addSeries} onClose={() => setModal(null)} />}
+
+      {modal?.kind === "read" && selected && <Sheet title="ここまで読んだ" onClose={() => setModal({ kind: "detail", id: selected.id })}><form className="quick-form" onSubmit={saveRead}><p>{selected.title}</p>{selected.everCompleted && <p className="quick-form-note">全巻読了の記録は残ったまま、再読の位置だけが変わります。</p>}<button className="start-from-one" type="button" onClick={saveReadFromStart}><BookOpen />1巻から読む</button><label><span>何巻まで読みましたか？</span><input autoFocus type="number" min="0" value={quickValue} onChange={(event) => setQuickValue(event.target.value)} placeholder="1巻からなら0" /></label>{formError && <p className="form-error">{formError}</p>}<button className="primary" type="submit"><Check />更新する</button></form></Sheet>}
       {modal?.kind === "owned" && selected && <Sheet title="所持巻を編集" onClose={() => setModal({ kind: "detail", id: selected.id })}><form className="quick-form" onSubmit={saveOwned}><p>{selected.title}</p><label><span>持っている巻</span><input autoFocus value={quickValue} onChange={(event) => setQuickValue(event.target.value)} placeholder="例：1-5, 7-10" /></label><small>所持なしなら空欄で保存します。</small>{formError && <p className="form-error">{formError}</p>}<button className="primary" type="submit"><Check />更新する</button></form></Sheet>}
+      {modal?.kind === "biblio" && <BiblioSheet targets={biblioTargets} onApply={applyBiblio} onClose={() => setModal(null)} />}
       {modal?.kind === "import" && importPreview && <Sheet title="インポート確認" onClose={() => setModal(null)}>{importPreview.valid ? <><div className="import-stats"><span>読込<strong>{importPreview.incoming.length}</strong></span><span>更新<strong>{importPreview.updatedSeries.length}</strong></span><span>新規<strong>{importPreview.newSeries.length}</strong></span><span>変更なし<strong>{importPreview.unchangedCount}</strong></span><span>警告<strong>{importPreview.titleWarnings.length + (importPreview.migratedV1 ? 1 : 0)}</strong></span></div>{importPreview.migratedV1 && <p className="warning-box">v1データです。旧巻表記は所持・既読へ確定せず、要確認の元情報として取り込みます。</p>}{importPreview.titleWarnings.map((warning) => <p className="warning-box" key={warning}>{warning}</p>)}<button className="primary full-button" onClick={applyImport}><Upload />{importPreview.updatedSeries.length}作品を更新・{importPreview.newSeries.length}作品を追加</button></> : importPreview.errors.map((error) => <p className="form-error" key={error}>{error}</p>)}</Sheet>}
 
       {undo && <div className="snackbar"><span>{undo.message}</span><button onClick={() => { setSeries(undo.before); setUndo(null); }}><RotateCcw />元に戻す</button></div>}
