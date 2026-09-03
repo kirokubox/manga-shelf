@@ -13,6 +13,7 @@ import { ShelfCard, ShoppingCard } from "./components/cards";
 import { AddSheet, type AddResult } from "./components/AddSheet";
 import { BiblioSheet, type BiblioChange } from "./components/BiblioSheet";
 import { mediumLabel, publicationLabel } from "./labels";
+import { downloadText } from "./fileUtils";
 import "./styles.css";
 
 type View = "shelf" | "shopping" | "settings";
@@ -74,15 +75,6 @@ const draftFromSeries = (item: MangaSeries): Draft => ({
   planned: item.planned,
   memo: item.memo,
 });
-
-function downloadText(filename: string, content: string, type: string) {
-  const url = URL.createObjectURL(new Blob([content], { type: `${type};charset=utf-8` }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
 
 function App() {
   const [series, setSeries] = useState<MangaSeries[]>(() => loadData().series);
